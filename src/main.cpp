@@ -8,7 +8,7 @@ const char *WIFI_SSID = "YOUR_WIFI_SSID";         // TODO: set
 const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"; // TODO: set
 
 /********** CONFIG: BACKEND **********/
-// Base URL of your backend (Next.js, etc.). No trailing slash.
+// Base URL of your backend (Next.js, etc.). No trailing slash.~
 const char *BACKEND_BASE_URL = "https://your-backend-domain.com"; // TODO: set
 // Endpoint paths on your backend.
 const char *BACKEND_NEXT_COMMAND = "/api/esp/next-command"; // GET
