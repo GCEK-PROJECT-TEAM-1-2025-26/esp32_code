@@ -1,34 +1,43 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 
 /********** CONFIG: WIFI **********/
-const char *WIFI_SSID = "YOUR_WIFI_SSID";         // TODO: set
-const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"; // TODO: set
+const char *WIFI_SSID = "SREEHARI";      // TODO: set
+const char *WIFI_PASSWORD = "447643899"; // TODO: set
 
 /********** CONFIG: BACKEND **********/
-// Base URL of your backend (Next.js, etc.). No trailing slash.~
-const char *BACKEND_BASE_URL = "https://your-backend-domain.com"; // TODO: set
+// Base URL of your backend (Next.js, etc.). No trailing slash.
+const char *BACKEND_BASE_URL = "https://smart-box-admin.vercel.app"; // TODO: set
 // Endpoint paths on your backend.
 const char *BACKEND_NEXT_COMMAND = "/api/esp/next-command"; // GET
 const char *BACKEND_ACK_ENDPOINT = "/api/esp/ack";          // POST
 // Device identity (must match how backend identifies this box).
-const char *DEVICE_ID = "box-001";                // TODO: set
-const char *DEVICE_SECRET = "super-secret-token"; // TODO: set (shared secret header)
+const char *DEVICE_ID = "box_001";                // TODO: set (must match Firestore doc)
+const char *DEVICE_SECRET = "super-secret-token"; // TODO: set (must match backend env var)
 
 /********** CONFIG: LOCK PINS **********/
 #define LOCK_CONTROL_PIN 5     // Output to relay / driver (change as needed)
 #define LOCK_FEEDBACK_PIN 18   // Input from microswitch/hall sensor (change as needed)
 #define LOCK_ACTIVE_LEVEL HIGH // Level that activates driver (change if low-active)
 
+/********** CONFIG: EV & 3-PIN RELAYS **********/
+#define EV_RELAY_PIN 19      // Output to EV relay (change as needed)
+#define EV_ACTIVE_LEVEL HIGH // change if relay is active LOW
+#define P3_RELAY_PIN 21      // Output to 3-pin relay (change as needed)
+#define P3_ACTIVE_LEVEL HIGH // change if relay is active LOW
+
 /********** TIMING **********/
 // How often to run a full cycle: read inputs, poll backend, send status.
 unsigned long lastCycleMillis = 0;
-const unsigned long CYCLE_INTERVAL_MS = 3000; // 3 seconds
+const unsigned long CYCLE_INTERVAL_MS = 5000; // 5 seconds
 
 /********** STATE **********/
-String lastCommandId = ""; // Last processed command, so backend doesn’t resend
+String lastCommandId = ""; // Last processed command, so backend doesn't resend
+bool currentEvOn = false;  // Track current EV relay state
+bool currentP3On = false;  // Track current 3-pin relay state
 
 /********** WIFI **********/
 void connectWiFi()
@@ -38,7 +47,6 @@ void connectWiFi()
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
     unsigned long startAttempt = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000)
     {
@@ -82,11 +90,40 @@ bool isLocked()
     return (val == HIGH);
 }
 
+/********** RELAY CONTROL: EV & 3-PIN **********/
+void setEvRelay(bool on)
+{
+    int level = on ? EV_ACTIVE_LEVEL : !EV_ACTIVE_LEVEL;
+    digitalWrite(EV_RELAY_PIN, level);
+    currentEvOn = on;
+    Serial.print("EV relay set to: ");
+    Serial.println(on ? "ON" : "OFF");
+}
+
+void setP3Relay(bool on)
+{
+    int level = on ? P3_ACTIVE_LEVEL : !P3_ACTIVE_LEVEL;
+    digitalWrite(P3_RELAY_PIN, level);
+    currentP3On = on;
+    Serial.print("3-pin relay set to: ");
+    Serial.println(on ? "ON" : "OFF");
+}
+
+bool getEvStatus()
+{
+    return currentEvOn;
+}
+
+bool getP3Status()
+{
+    return currentP3On;
+}
+
 /********** BACKEND: GET NEXT COMMAND **********/
 // Expects backend to return JSON like:
 // { "none": true }
-// or { "commandId": "abc123", "action": "LOCK" }
-bool fetchNextCommand(String &commandId, String &action)
+// or { "commandId": "abc123", "actions": { "lock": "LOCK", "ev": true, "p3": false } }
+bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &evOn, bool &p3Set, bool &p3On)
 {
     if (WiFi.status() != WL_CONNECTED)
     {
@@ -95,58 +132,84 @@ bool fetchNextCommand(String &commandId, String &action)
             return false;
     }
 
-    HTTPClient http;
-    String url = String(BACKEND_BASE_URL) + BACKEND_NEXT_COMMAND +
-                 "?deviceId=" + DEVICE_ID +
-                 "&lastCommandId=" + lastCommandId;
+    WiFiClientSecure client;
+    client.setInsecure(); // OK for now
 
-    Serial.print("GET ");
+    HTTPClient http;
+
+    String url = String(BACKEND_BASE_URL) + BACKEND_NEXT_COMMAND +
+                 "?lastCommandId=" + lastCommandId;
+
+    Serial.println("\n--- FETCH COMMAND ---");
     Serial.println(url);
 
-    http.begin(url);
-    http.addHeader("X-DEVICE-ID", DEVICE_ID);
-    http.addHeader("X-DEVICE-SECRET", DEVICE_SECRET);
+    http.begin(client, url);
+    http.setTimeout(10000);
+
+    // ✅ FIXED HEADERS (LOWERCASE)
+    http.addHeader("x-device-id", DEVICE_ID);
+    http.addHeader("x-device-secret", DEVICE_SECRET);
 
     int httpCode = http.GET();
-    if (httpCode <= 0)
-    {
-        Serial.print("HTTP GET failed: ");
-        Serial.println(http.errorToString(httpCode));
-        http.end();
-        return false;
-    }
 
-    Serial.print("HTTP GET code: ");
+    Serial.print("HTTP CODE: ");
     Serial.println(httpCode);
+
+    String payload = http.getString();
+    Serial.print("RESPONSE: ");
+    Serial.println(payload);
 
     if (httpCode != 200)
     {
+        Serial.println("GET FAILED");
         http.end();
         return false;
     }
 
-    String payload = http.getString();
-    http.end();
-    Serial.print("Command payload: ");
-    Serial.println(payload);
-
-    StaticJsonDocument<256> doc;
+    StaticJsonDocument<512> doc;
     DeserializationError err = deserializeJson(doc, payload);
+
     if (err)
     {
-        Serial.print("JSON parse error: ");
+        Serial.print("JSON ERROR: ");
         Serial.println(err.c_str());
+        http.end();
         return false;
     }
 
-    if (doc.containsKey("none") && doc["none"].as<bool>() == true)
+    if (doc["none"] == true)
     {
-        return false; // No new command
+        http.end();
+        return false;
     }
 
     commandId = doc["commandId"].as<String>();
-    action = doc["action"].as<String>();
 
+    lockAction = "";
+    evSet = false;
+    p3Set = false;
+
+    if (doc.containsKey("actions"))
+    {
+        JsonObject actions = doc["actions"];
+
+        if (actions.containsKey("lock"))
+            lockAction = actions["lock"].as<String>();
+
+        if (actions.containsKey("ev"))
+        {
+            evSet = true;
+            evOn = actions["ev"];
+        }
+
+        if (actions.containsKey("p3"))
+        {
+            p3Set = true;
+            p3On = actions["p3"];
+        }
+    }
+
+    http.end();
     return true;
 }
 
@@ -154,9 +217,10 @@ bool fetchNextCommand(String &commandId, String &action)
 // Sends current status and the result of the last command.
 // You can extend the JSON with PZEM measurements later.
 bool sendStatus(const String &commandId,
-                const String &action,
                 bool commandSuccess,
-                bool locked)
+                bool locked,
+                bool evOn,
+                bool p3On)
 {
     if (WiFi.status() != WL_CONNECTED)
     {
@@ -165,51 +229,63 @@ bool sendStatus(const String &commandId,
             return false;
     }
 
+    // ❌ Don't send empty commandId
+    if (commandId == "")
+    {
+        Serial.println("Skipping POST (no command)");
+        return true;
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
     HTTPClient http;
+
     String url = String(BACKEND_BASE_URL) + BACKEND_ACK_ENDPOINT;
-    Serial.print("POST ");
+
+    Serial.println("\n--- SEND STATUS ---");
     Serial.println(url);
 
-    http.begin(url);
+    http.begin(client, url);
+    http.setTimeout(10000);
+
     http.addHeader("Content-Type", "application/json");
-    http.addHeader("X-DEVICE-ID", DEVICE_ID);
-    http.addHeader("X-DEVICE-SECRET", DEVICE_SECRET);
+
+    // ✅ FIXED HEADERS
+    http.addHeader("x-device-id", DEVICE_ID);
+    http.addHeader("x-device-secret", DEVICE_SECRET);
 
     StaticJsonDocument<512> doc;
-    doc["deviceId"] = DEVICE_ID;
-    doc["commandId"] = commandId;
-    doc["action"] = action;
-    doc["success"] = commandSuccess;
-    doc["lockState"] = locked ? "LOCKED" : "UNLOCKED";
-    doc["timestampMillis"] = (long long)millis();
 
-    // Placeholder energy block – fill from PZEM later.
+    doc["commandId"] = commandId;
+    doc["success"] = commandSuccess;
+    doc["timestamp"] = millis();
+
+    JsonObject state = doc.createNestedObject("state");
+    state["lock"] = locked ? "LOCKED" : "UNLOCKED";
+    state["ev"] = evOn;
+    state["p3"] = p3On;
+
     JsonObject energy = doc.createNestedObject("energy");
-    energy["hasData"] = false;
+    energy["ok"] = false;
 
     String body;
     serializeJson(doc, body);
 
-    Serial.print("POST body: ");
+    Serial.print("POST BODY: ");
     Serial.println(body);
 
     int httpCode = http.POST(body);
-    if (httpCode <= 0)
-    {
-        Serial.print("HTTP POST failed: ");
-        Serial.println(http.errorToString(httpCode));
-        http.end();
-        return false;
-    }
 
-    Serial.print("HTTP POST code: ");
+    Serial.print("HTTP CODE: ");
     Serial.println(httpCode);
 
     String response = http.getString();
-    Serial.print("Response: ");
+    Serial.print("RESPONSE: ");
     Serial.println(response);
 
     http.end();
+
     return (httpCode == 200 || httpCode == 201);
 }
 
@@ -219,14 +295,23 @@ void setup()
     Serial.begin(115200);
     delay(1000);
 
+    // Lock pins
     pinMode(LOCK_CONTROL_PIN, OUTPUT);
     digitalWrite(LOCK_CONTROL_PIN, !LOCK_ACTIVE_LEVEL); // idle state
+    pinMode(LOCK_FEEDBACK_PIN, INPUT_PULLUP);           // change if needed
 
-    pinMode(LOCK_FEEDBACK_PIN, INPUT_PULLUP); // change if needed
+    // Relay pins
+    pinMode(EV_RELAY_PIN, OUTPUT);
+    digitalWrite(EV_RELAY_PIN, !EV_ACTIVE_LEVEL); // idle state
+    currentEvOn = false;
+
+    pinMode(P3_RELAY_PIN, OUTPUT);
+    digitalWrite(P3_RELAY_PIN, !P3_ACTIVE_LEVEL); // idle state
+    currentP3On = false;
 
     connectWiFi();
 
-    Serial.println("Smart box ESP32 started (backend mode)");
+    Serial.println("Smart box ESP32 started (backend mode with EV & 3-pin relay control)");
 }
 
 void loop()
@@ -237,52 +322,71 @@ void loop()
     {
         lastCycleMillis = now;
 
-        // 1) Read current lock state
+        // 1) Read current lock state before any commands
         bool lockedBefore = isLocked();
         Serial.print("Lock state before cmd: ");
         Serial.println(lockedBefore ? "LOCKED" : "UNLOCKED");
 
         // 2) Fetch next command (if any)
-        String cmdId, action;
-        bool hasCommand = fetchNextCommand(cmdId, action);
+        String cmdId;
+        String lockAction;
+        bool evSet, evOn, p3Set, p3On;
+        bool hasCommand = fetchNextCommand(cmdId, lockAction, evSet, evOn, p3Set, p3On);
 
         bool commandSuccess = true;
-        String reportCmdId = lastCommandId;
-        String reportAction = "STATUS";
 
         if (hasCommand)
         {
             Serial.print("Received command: ");
-            Serial.print(cmdId);
-            Serial.print(" action=");
-            Serial.println(action);
+            Serial.println(cmdId);
 
-            if (action == "LOCK")
+            // Handle lock command
+            if (!lockAction.isEmpty())
             {
-                lockBox();
+                if (lockAction == "LOCK")
+                {
+                    lockBox();
+                }
+                else if (lockAction == "UNLOCK")
+                {
+                    unlockBox();
+                }
+                else
+                {
+                    Serial.println("Unknown lock action");
+                    commandSuccess = false;
+                }
             }
-            else if (action == "UNLOCK")
+
+            // Handle EV relay command
+            if (evSet)
             {
-                unlockBox();
+                setEvRelay(evOn);
             }
-            else
+
+            // Handle 3-pin relay command
+            if (p3Set)
             {
-                Serial.println("Unknown action");
-                commandSuccess = false;
+                setP3Relay(p3On);
             }
 
             lastCommandId = cmdId;
-            reportCmdId = cmdId;
-            reportAction = action;
         }
 
-        // 3) Read lock state after command
+        // 3) Read final states after all commands executed
         bool lockedAfter = isLocked();
+        bool evStatus = getEvStatus();
+        bool p3Status = getP3Status();
+
         Serial.print("Lock state after cmd: ");
         Serial.println(lockedAfter ? "LOCKED" : "UNLOCKED");
+        Serial.print("EV relay state: ");
+        Serial.println(evStatus ? "ON" : "OFF");
+        Serial.print("3-pin relay state: ");
+        Serial.println(p3Status ? "ON" : "OFF");
 
         // 4) Send status & command result back to backend
-        bool ok = sendStatus(reportCmdId, reportAction, commandSuccess, lockedAfter);
+        bool ok = sendStatus(lastCommandId, commandSuccess, lockedAfter, evStatus, p3Status);
         if (!ok)
         {
             Serial.println("Failed to send status to backend");
