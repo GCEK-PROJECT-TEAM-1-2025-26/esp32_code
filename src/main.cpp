@@ -131,60 +131,62 @@ bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &
         if (WiFi.status() != WL_CONNECTED)
             return false;
     }
-
-    WiFiClientSecure client;
-    client.setInsecure(); // OK for now
-
     HTTPClient http;
-
     String url = String(BACKEND_BASE_URL) + BACKEND_NEXT_COMMAND +
-                 "?lastCommandId=" + lastCommandId;
-
-    Serial.println("\n--- FETCH COMMAND ---");
+                 "?deviceId=" + DEVICE_ID +
+                 "&lastCommandId=" + lastCommandId;
+    Serial.print("GET ");
     Serial.println(url);
 
-    http.begin(client, url);
-    http.setTimeout(10000);
+    // For HTTPS with Vercel (valid SSL certificate)
+    WiFiClientSecure client;
+    client.setInsecure();      // Disable SSL verification (temporary for troubleshooting)
+    client.setCACert(nullptr); // Use system CA bundle for valid certificates
 
-    // ✅ FIXED HEADERS (LOWERCASE)
-    http.addHeader("x-device-id", DEVICE_ID);
-    http.addHeader("x-device-secret", DEVICE_SECRET);
+    http.begin(client, url);
+    http.addHeader("X-DEVICE-ID", DEVICE_ID);
+    http.addHeader("X-DEVICE-SECRET", DEVICE_SECRET);
 
     int httpCode = http.GET();
+    if (httpCode <= 0)
+    {
+        Serial.print("HTTP GET failed: ");
+        Serial.println(http.errorToString(httpCode));
+        http.end();
+        return false;
+    }
 
-    Serial.print("HTTP CODE: ");
+    Serial.print("HTTP GET code: ");
     Serial.println(httpCode);
-
-    String payload = http.getString();
-    Serial.print("RESPONSE: ");
-    Serial.println(payload);
 
     if (httpCode != 200)
     {
-        Serial.println("GET FAILED");
         http.end();
         return false;
     }
+
+    String payload = http.getString();
+    http.end();
+    Serial.print("Command payload: ");
+    Serial.println(payload);
 
     StaticJsonDocument<512> doc;
     DeserializationError err = deserializeJson(doc, payload);
-
     if (err)
     {
-        Serial.print("JSON ERROR: ");
+        Serial.print("JSON parse error: ");
         Serial.println(err.c_str());
-        http.end();
         return false;
     }
 
-    if (doc["none"] == true)
+    if (doc.containsKey("none") && doc["none"].as<bool>() == true)
     {
-        http.end();
-        return false;
+        return false; // No new command
     }
 
     commandId = doc["commandId"].as<String>();
 
+    // Parse actions object
     lockAction = "";
     evSet = false;
     p3Set = false;
@@ -194,22 +196,23 @@ bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &
         JsonObject actions = doc["actions"];
 
         if (actions.containsKey("lock"))
+        {
             lockAction = actions["lock"].as<String>();
+        }
 
         if (actions.containsKey("ev"))
         {
             evSet = true;
-            evOn = actions["ev"];
+            evOn = actions["ev"].as<bool>();
         }
 
         if (actions.containsKey("p3"))
         {
             p3Set = true;
-            p3On = actions["p3"];
+            p3On = actions["p3"].as<bool>();
         }
     }
 
-    http.end();
     return true;
 }
 
@@ -228,64 +231,74 @@ bool sendStatus(const String &commandId,
         if (WiFi.status() != WL_CONNECTED)
             return false;
     }
-
-    // ❌ Don't send empty commandId
-    if (commandId == "")
-    {
-        Serial.println("Skipping POST (no command)");
-        return true;
-    }
-
-    WiFiClientSecure client;
-    client.setInsecure();
-
     HTTPClient http;
-
     String url = String(BACKEND_BASE_URL) + BACKEND_ACK_ENDPOINT;
 
-    Serial.println("\n--- SEND STATUS ---");
+    Serial.print("POST ");
     Serial.println(url);
 
+    WiFiClientSecure client;
+    client.setInsecure();      // Disable SSL verification (temporary for troubleshooting)
+    client.setCACert(nullptr); // Use system CA bundle for valid certificates
+
     http.begin(client, url);
-    http.setTimeout(10000);
-
     http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-DEVICE-ID", DEVICE_ID);
+    http.addHeader("X-DEVICE-SECRET", DEVICE_SECRET);
 
-    // ✅ FIXED HEADERS
-    http.addHeader("x-device-id", DEVICE_ID);
-    http.addHeader("x-device-secret", DEVICE_SECRET);
-
-    StaticJsonDocument<512> doc;
-
+    StaticJsonDocument<768> doc;
+    doc["deviceId"] = DEVICE_ID;
     doc["commandId"] = commandId;
     doc["success"] = commandSuccess;
-    doc["timestamp"] = millis();
+    doc["timestamp"] = (long long)millis();
 
+    // Device state
     JsonObject state = doc.createNestedObject("state");
     state["lock"] = locked ? "LOCKED" : "UNLOCKED";
     state["ev"] = evOn;
     state["p3"] = p3On;
 
+    // Placeholder energy measurements (fill from PZEM later)
     JsonObject energy = doc.createNestedObject("energy");
-    energy["ok"] = false;
+    energy["ok"] = false; // TODO: set to true when PZEM is integrated
+
+    // EV meter placeholder
+    JsonObject evMeter = energy.createNestedObject("evmeter");
+    evMeter["voltage"] = 0.0;
+    evMeter["current"] = 0.0;
+    evMeter["power"] = 0.0;
+    evMeter["energy"] = 0.0;
+
+    // 3-pin meter placeholder
+    JsonObject p3Meter = energy.createNestedObject("p3meter");
+    p3Meter["voltage"] = 0.0;
+    p3Meter["current"] = 0.0;
+    p3Meter["power"] = 0.0;
+    p3Meter["energy"] = 0.0;
 
     String body;
     serializeJson(doc, body);
 
-    Serial.print("POST BODY: ");
+    Serial.print("POST body: ");
     Serial.println(body);
 
     int httpCode = http.POST(body);
+    if (httpCode <= 0)
+    {
+        Serial.print("HTTP POST failed: ");
+        Serial.println(http.errorToString(httpCode));
+        http.end();
+        return false;
+    }
 
-    Serial.print("HTTP CODE: ");
+    Serial.print("HTTP POST code: ");
     Serial.println(httpCode);
 
     String response = http.getString();
-    Serial.print("RESPONSE: ");
+    Serial.print("Response: ");
     Serial.println(response);
 
     http.end();
-
     return (httpCode == 200 || httpCode == 201);
 }
 
