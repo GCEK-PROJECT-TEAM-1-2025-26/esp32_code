@@ -1,4 +1,5 @@
 # ESP32 Smart Box Integration - Status Report
+
 **Last Updated:** April 12, 2026  
 **Status:** 🔄 **IN PROGRESS**
 
@@ -7,6 +8,7 @@
 ## 📋 Project Overview
 
 This document tracks the complete integration of an ESP32 microcontroller with a Next.js backend (Vercel-hosted) and Flutter mobile app for a smart box system. The system controls:
+
 - **Lock** - Electronic lock with feedback sensor
 - **EV Charger Relay** - On/Off control with energy monitoring
 - **3-Pin Socket Relay** - On/Off control with energy monitoring
@@ -21,6 +23,7 @@ This document tracks the complete integration of an ESP32 microcontroller with a
 #### ✅ API Endpoints Created
 
 **File:** `m:\smart-box-admin\app\api\esp\next-command\route.ts`
+
 - **Method:** GET
 - **Purpose:** Poll for pending commands from Firestore
 - **Authentication:** Via `X-DEVICE-ID` and `X-DEVICE-SECRET` headers
@@ -38,6 +41,7 @@ This document tracks the complete integration of an ESP32 microcontroller with a
 - **Status:** ✅ Fixed formatting issues and deployed
 
 **File:** `m:\smart-box-admin\app\api\esp\ack\route.ts`
+
 - **Method:** POST
 - **Purpose:** Receive device status updates and execute results
 - **Authentication:** Via headers (same as above)
@@ -64,6 +68,7 @@ This document tracks the complete integration of an ESP32 microcontroller with a
 #### ✅ Firebase Admin SDK Integration
 
 **File:** `m:\smart-box-admin\lib\firebase-admin.ts`
+
 - Initializes Firebase Admin SDK with service account credentials
 - Exposes `db` instance for Firestore operations
 - **Status:** ✅ Complete
@@ -71,12 +76,14 @@ This document tracks the complete integration of an ESP32 microcontroller with a
 #### ✅ Environment Variables Configuration
 
 **File:** `m:\smart-box-admin\.env.local` (local development)
+
 - `FIREBASE_SERVICE_ACCOUNT_JSON` - Firebase service account
 - `ESP_DEVICE_SECRET` - Shared secret for ESP32 authentication
 - Firebase public configuration variables
 - **Status:** ✅ Set locally
 
 **Vercel Dashboard Environment Variables** ✅ All set:
+
 - `FIREBASE_SERVICE_ACCOUNT_JSON`
 - `ESP_DEVICE_SECRET`
 - `NEXT_PUBLIC_FIREBASE_API_KEY`
@@ -142,18 +149,22 @@ const char *DEVICE_SECRET = "super-secret-token";
 #### ✅ HTTP Communication
 
 **GET Request** - Fetch next command
+
 ```cpp
 bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &evOn, bool &p3Set, bool &p3On)
 ```
+
 - URL: `https://smart-box-admin.vercel.app/api/esp/next-command?lastCommandId=...`
 - Headers: `x-device-id`, `x-device-secret`
 - Uses `WiFiClientSecure` with SSL verification disabled (temporary)
 - **Status:** ✅ Complete - headers fixed to lowercase
 
 **POST Request** - Send status update
+
 ```cpp
 bool sendStatus(const String &commandId, bool commandSuccess, bool locked, bool evOn, bool p3On)
 ```
+
 - URL: `https://smart-box-admin.vercel.app/api/esp/ack`
 - Headers: `x-device-id`, `x-device-secret`, `Content-Type: application/json`
 - Sends JSON with command result and device state
@@ -191,6 +202,7 @@ bool sendStatus(const String &commandId, bool commandSuccess, bool locked, bool 
 **File:** `m:\smart-box-admin\FIRESTORE_RULES_UPDATED.txt`
 
 Rules implemented with minimal protection for ESP32:
+
 - All authenticated users can read/write most data
 - Commands: Users can CREATE with status "PENDING" only
 - Commands: Backend can UPDATE to "completed"/"failed"
@@ -261,6 +273,7 @@ firestore/
 **Status:** ⏳ **NOT YET STARTED**
 
 **What needs to be done:**
+
 - [ ] Install PZEM004Tv30 library in PlatformIO
 - [ ] Configure UART pins for PZEM meters (2× independent meters)
 - [ ] Implement functions to read:
@@ -273,6 +286,7 @@ firestore/
 - [ ] Store time-series data in Firestore `energy_readings` collection
 
 **Files to modify:**
+
 - `m:\smart_box_app_esp\src\main.cpp` - Add PZEM functions and integration
 - `m:\smart_box_app_esp\platformio.ini` - Add PZEM library dependency
 
@@ -283,11 +297,13 @@ firestore/
 **Status:** ⏳ **AWAITING UPLOAD**
 
 **Prerequisites:**
+
 - [ ] Upload ESP32 firmware via PlatformIO
 - [ ] Connect ESP32 to computer via USB
 - [ ] Monitor serial output (115200 baud)
 
 **Testing checklist:**
+
 - [ ] WiFi connection successful
 - [ ] Successfully connects to backend at `https://smart-box-admin.vercel.app`
 - [ ] Receives commands from Firestore
@@ -300,6 +316,7 @@ firestore/
 **Status:** ⏳ **BLOCKED ON HARDWARE UPLOAD**
 
 **Test scenarios:**
+
 - [ ] **Lock Control**: Create lock command in Flutter app → ESP32 receives → Lock pulses → Status sent back → Flutter updates
 - [ ] **EV Relay Control**: Turn on EV relay from Flutter → ESP32 executes → Relay energizes → Status sent → Flutter shows ON
 - [ ] **3-Pin Socket Control**: Turn on 3-pin relay → ESP32 executes → Relay energizes → Status sent → Flutter shows ON
@@ -348,24 +365,28 @@ firestore/
 ## 🚀 Next Steps (Priority Order)
 
 ### **IMMEDIATE (Next Session)**
+
 1. [ ] Upload ESP32 firmware to hardware via USB
 2. [ ] Monitor serial output for WiFi connection
 3. [ ] Verify backend connectivity (check logs in Vercel)
 4. [ ] Test basic command reception
 
 ### **SHORT TERM**
+
 1. [ ] Integrate PZEM energy monitoring
 2. [ ] Test full lock control flow
 3. [ ] Test EV relay control flow
 4. [ ] Test 3-pin socket control flow
 
 ### **MEDIUM TERM**
+
 1. [ ] Add support for multiple ESP32 devices
 2. [ ] Implement command history/logging
 3. [ ] Add error recovery mechanisms
 4. [ ] Implement offline queuing
 
 ### **LONG TERM**
+
 1. [ ] Add webhook notifications for state changes
 2. [ ] Implement scheduled commands
 3. [ ] Add analytics dashboard
@@ -375,21 +396,22 @@ firestore/
 
 ## 📁 File Locations
 
-| Component | File Path | Status |
-|-----------|-----------|--------|
-| **Backend - GET endpoint** | `m:\smart-box-admin\app\api\esp\next-command\route.ts` | ✅ Complete |
-| **Backend - POST endpoint** | `m:\smart-box-admin\app\api\esp\ack\route.ts` | ✅ Complete |
-| **Firebase Admin** | `m:\smart-box-admin\lib\firebase-admin.ts` | ✅ Complete |
-| **ESP32 Firmware** | `m:\smart_box_app_esp\src\main.cpp` | ✅ Complete (no PZEM yet) |
-| **PlatformIO Config** | `m:\smart_box_app_esp\platformio.ini` | ✅ Complete |
-| **Flutter App** | `m:\smart_box_app\lib\...` | ✅ Real-time listener working |
-| **Firestore Rules** | Firestore Console | ✅ Deployed |
+| Component                   | File Path                                              | Status                        |
+| --------------------------- | ------------------------------------------------------ | ----------------------------- |
+| **Backend - GET endpoint**  | `m:\smart-box-admin\app\api\esp\next-command\route.ts` | ✅ Complete                   |
+| **Backend - POST endpoint** | `m:\smart-box-admin\app\api\esp\ack\route.ts`          | ✅ Complete                   |
+| **Firebase Admin**          | `m:\smart-box-admin\lib\firebase-admin.ts`             | ✅ Complete                   |
+| **ESP32 Firmware**          | `m:\smart_box_app_esp\src\main.cpp`                    | ✅ Complete (no PZEM yet)     |
+| **PlatformIO Config**       | `m:\smart_box_app_esp\platformio.ini`                  | ✅ Complete                   |
+| **Flutter App**             | `m:\smart_box_app\lib\...`                             | ✅ Real-time listener working |
+| **Firestore Rules**         | Firestore Console                                      | ✅ Deployed                   |
 
 ---
 
 ## 🔧 Configuration Reference
 
 ### ESP32 Configuration
+
 ```cpp
 WiFi: SREEHARI / 447643899
 Backend: https://smart-box-admin.vercel.app
@@ -405,6 +427,7 @@ Pins:
 ```
 
 ### Backend Configuration
+
 ```
 Vercel Project: smart-box-admin
 Environment: Production
@@ -413,6 +436,7 @@ Firebase: Connected via service account
 ```
 
 ### Firestore Configuration
+
 ```
 Project: smart-box-admin (Firebase)
 Authentication: Email + Google OAuth
@@ -423,19 +447,23 @@ Rules: Minimal protection (deployed)
 
 ## 📝 Documentation Generated
 
-| Document | Purpose | Location |
-|----------|---------|----------|
-| ESP32 Integration Complete | Initial setup guide | `m:\smart-box-admin\ESP32_INTEGRATION_COMPLETE.md` |
-| Firestore Rules Updated | Security rules explanation | `m:\smart-box-admin\FIRESTORE_RULES_UPDATED.txt` |
-| Deploy Rules 2 Min | Quick Firestore deployment | `m:\smart-box-admin\DEPLOY_RULES_2MIN.md` |
-| Vercel Connection Guide | Troubleshooting guide | `m:\smart-box-admin\ESP32_VERCEL_CONNECTION_GUIDE.md` |
-| ESP32 Deployment Checklist | Pre-upload checklist | `m:\smart-box-admin\ESP32_DEPLOYMENT_CHECKLIST.md` |
+| Document                   | Purpose                    | Location                                              |
+| -------------------------- | -------------------------- | ----------------------------------------------------- |
+| ESP32 Integration Complete | Initial setup guide        | `m:\smart-box-admin\ESP32_INTEGRATION_COMPLETE.md`    |
+| Firestore Rules Updated    | Security rules explanation | `m:\smart-box-admin\FIRESTORE_RULES_UPDATED.txt`      |
+| Deploy Rules 2 Min         | Quick Firestore deployment | `m:\smart-box-admin\DEPLOY_RULES_2MIN.md`             |
+| Vercel Connection Guide    | Troubleshooting guide      | `m:\smart-box-admin\ESP32_VERCEL_CONNECTION_GUIDE.md` |
+| ESP32 Deployment Checklist | Pre-upload checklist       | `m:\smart-box-admin\ESP32_DEPLOYMENT_CHECKLIST.md`    |
 
 ---
 
 ## ⚠️ Known Issues / Notes
 
-1. **SSL Verification:** ESP32 uses `setInsecure()` to disable SSL verification (temporary for troubleshooting). Should be fixed once stable.
+1. ✅ **SSL Verification:** Currently using `setInsecure()` for development/testing
+
+   - Acceptable for Vercel (trusted domain)
+   - TODO: Implement proper certificate validation for production
+   - See CERTIFICATE_FIX.md for implementation details
 
 2. **Energy Data:** Currently sending placeholder `"ok": false` for energy readings. Will be replaced with real PZEM data.
 
@@ -461,6 +489,8 @@ Rules: Minimal protection (deployed)
 - ✅ Lock control functions implemented
 - ✅ Relay control functions implemented
 - ✅ HTTP communication established
+- ✅ **SSL certificate properly configured** for Vercel HTTPS
+- ✅ **Header case fixed** to lowercase (x-device-id, x-device-secret)
 - ⏳ PZEM energy monitoring integrated
 - ❌ Hardware testing complete
 - ❌ End-to-end integration testing complete
@@ -481,4 +511,3 @@ Rules: Minimal protection (deployed)
 **Document Version:** 1.0  
 **Last Updated:** April 12, 2026  
 **Status:** 🔄 IN PROGRESS - Awaiting ESP32 Hardware Upload
-
