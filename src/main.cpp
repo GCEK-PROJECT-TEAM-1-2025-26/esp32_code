@@ -48,7 +48,9 @@ const char *DEVICE_SECRET = "super-secret-token"; // TODO: set (must match backe
 
 /********** CONFIG: RFID READER **********/
 // RFID status input pin (reads if RFID card is detected)
-#define RFID_STATUS_PIN 4 // Input from RFID reader (HIGH = card detected, LOW = no card)
+// NOTE: Changed from GPIO 4 (problematic) to GPIO 32 (dedicated input, no boot issues)
+// Safe pins: 32, 33, 34, 35 (dedicated input pins with no boot strapping or LED conflicts)
+#define RFID_STATUS_PIN 32 // Input from RFID reader (HIGH = card detected, LOW = no card)
 
 /********** TIMING **********/
 // How often to run a full cycle: read inputs, poll backend, send status.
@@ -202,6 +204,13 @@ bool isRfidCardDetected()
 {
     int val = digitalRead(RFID_STATUS_PIN);
     // HIGH = card detected, LOW = no card
+    // DEBUG: Print raw GPIO value every 10 cycles
+    static int debugCounter = 0;
+    if (debugCounter++ % 10 == 0)
+    {
+        Serial.print("DEBUG RFID GPIO32 raw value: ");
+        Serial.println(val);
+    }
     return (val == HIGH);
 }
 
