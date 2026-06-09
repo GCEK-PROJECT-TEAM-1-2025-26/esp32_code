@@ -1,0 +1,127 @@
+# OLED Display Quick Reference
+
+## 4 Display Screens (Auto-rotating)
+
+```
+┌─────────────────────────────────┐
+│ SCREEN 1: MAIN STATUS           │
+├─────────────────────────────────┤
+│ BOX: box_002                    │
+│ WiFi: ON                        │
+│ Lock: LOCKED                    │
+│ RFID: DETECTED                  │
+│ EV: OFF | 3-Pin: OFF            │
+│ Status: OK                      │
+└─────────────────────────────────┘
+
+┌─────────────────────────────────┐
+│ SCREEN 2: ENERGY READINGS       │
+├─────────────────────────────────┤
+│ === ENERGY ===                  │
+│                                 │
+│ EV:                             │
+│ V:230 I:0.0A                    │
+│ P:0W E:0.00kWh                  │
+│                                 │
+│ 3-PIN:                          │
+│ V:0 I:0.0A                      │
+│ P:0W E:0.00kWh                  │
+└─────────────────────────────────┘
+
+┌─────────────────────────────────┐
+│ SCREEN 3: NETWORK STATUS        │
+├─────────────────────────────────┤
+│ === NETWORK ===                 │
+│                                 │
+│ WiFi: CONNECTED                 │
+│ Device: box_002                 │
+│ Status: OK                      │
+│                                 │
+│ Last Cmd: abc123xyz             │
+└─────────────────────────────────┘
+
+┌─────────────────────────────────┐
+│ SCREEN 4: DIAGNOSTICS           │
+├─────────────────────────────────┤
+│ === DIAGNOSTICS ===             │
+│                                 │
+│ Error: 0                        │
+│ (no error message)              │
+│                                 │
+│ Uptime: 12h 45m                 │
+└─────────────────────────────────┘
+```
+
+## I2C Wiring
+
+```
+ESP32 Pin Configuration:
+GPIO 22 (SCL) → OLED SCL
+GPIO 21 (SDA) → OLED SDA
+GND          → OLED GND
+3.3V         → OLED VCC
+```
+
+## Error Codes at a Glance
+
+| Code | Meaning |
+|------|---------|
+| 0 | ✓ All OK |
+| 1 | ✗ OLED Not Found |
+| 2 | ✗ Backend Timeout |
+| 3 | ✗ WiFi Disconnected |
+| 4 | ✗ Sensor Error |
+| 5 | ✗ Lock Fault |
+
+## Display Updates
+
+- **Screen rotation**: Every 5 seconds
+- **Status update**: Real-time (every 5 seconds cycle)
+- **Energy readings**: Every 5 seconds
+- **Error display**: Immediate
+
+## State Displayed
+
+✓ WiFi connection status
+✓ Lock state (LOCKED/UNLOCKED)
+✓ RFID card detection
+✓ EV Charger relay state
+✓ 3-Pin Socket relay state
+✓ Energy voltage/current/power
+✓ Energy consumption (kWh)
+✓ Error codes and messages
+✓ System uptime
+✓ Last command ID
+
+## Startup Sequence
+
+1. OLED shows: "Smart Box ESP32" + "Initializing..."
+2. Waits 2 seconds
+3. Begins 4-screen auto-rotation
+4. Screen 1 (Main Status) displayed first
+5. Auto-rotates every 5 seconds
+
+## Key Functions in Code
+
+```cpp
+initializeDisplay()    // Init OLED at startup
+displayMainStatus()    // Screen 1
+displayEnergyReadings() // Screen 2
+displayNetworkStatus() // Screen 3
+displayDiagnostics()   // Screen 4
+updateDisplay()        // Call in main loop
+```
+
+## Troubleshooting Quick Fixes
+
+| Issue | Fix |
+|-------|-----|
+| Nothing on screen | Check SCL/SDA connections (GPIO 22/21) |
+| Garbled text | Try I2C address 0x3D instead of 0x3C |
+| Freezing | Check if PZEM is conflicting on I2C |
+| No updates | Verify `updateDisplay()` in main loop |
+| Power issues | Use 3.3V (not 5V), add capacitors if needed |
+
+---
+
+**Quick Start**: Connect OLED to GPIO 22 (SCL) and GPIO 21 (SDA), upload firmware, and you're ready!

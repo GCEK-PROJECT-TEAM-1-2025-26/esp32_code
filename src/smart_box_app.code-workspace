@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../smart_box_app"
+		},
+		{
+			"path": "../../smart-box-admin"
+		},
+		{
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

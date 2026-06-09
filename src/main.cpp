@@ -4,72 +4,9 @@
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <PZEM004Tv30.h>
-
-/********** CONFIG: WIFI **********/
-const char *WIFI_SSID = "SREEHARI";      // TODO: set
-const char *WIFI_PASSWORD = "447643899"; // TODO: set
-
-/********** CONFIG: BACKEND **********/
-// Base URL of your backend (Next.js, etc.). No trailing slash.
-const char *BACKEND_BASE_URL = "https://smart-box-admin.vercel.app"; // TODO: set
-// Endpoint paths on your backend.
-const char *BACKEND_NEXT_COMMAND = "/api/esp/next-command"; // GET
-const char *BACKEND_ACK_ENDPOINT = "/api/esp/ack";          // POST
-// Device identity (must match how backend identifies this box).
-const char *DEVICE_ID = "box_001";                // TODO: set (must match Firestore doc)
-const char *DEVICE_SECRET = "super-secret-token"; // TODO: set (must match backend env var)
-
-/********** CONFIG: LOCK PINS **********/
-#define LOCK_CONTROL_PIN 5     // Output to relay / driver (change as needed)
-#define LOCK_FEEDBACK_PIN 18   // Input from microswitch/hall sensor (change as needed)
-#define LOCK_ACTIVE_LEVEL HIGH // Level that activates driver (change if low-active)
-
-/********** CONFIG: EV & 3-PIN RELAYS **********/
-#define EV_RELAY_PIN 19      // Output to EV relay (change as needed)
-#define EV_ACTIVE_LEVEL HIGH // change if relay is active LOW
-#define P3_RELAY_PIN 21      // Output to 3-pin relay (change as needed)
-#define P3_ACTIVE_LEVEL HIGH // change if relay is active LOW
-
-/********** CONFIG: PZEM ENERGY METERS **********/
-// PZEM #1 for EV Charger - using UART Serial2 (RX=16, TX=17)
-#define PZEM_EV_RX_PIN 16
-#define PZEM_EV_TX_PIN 17
-#define PZEM_EV_BAUD 9600
-
-// PZEM #2 for 3-Pin Socket - using UART Serial1 (RX=13, TX=12)
-// NOTE: Changed from 9,10 to 13,12 (ESP32 has limited pins, 9,10 not available)
-#define PZEM_P3_RX_PIN 13
-#define PZEM_P3_TX_PIN 12
-#define PZEM_P3_BAUD 9600
-
-// PZEM device addresses (default is 0xF8, can be changed)
-#define PZEM_EV_ADDR 0xF8
-#define PZEM_P3_ADDR 0xF8
-
-/********** CONFIG: RFID READER **********/
-// RFID status input pin (reads if RFID card is detected)
-// NOTE: Changed from GPIO 4 (problematic) to GPIO 32 (dedicated input, no boot issues)
-// Safe pins: 32, 33, 34, 35 (dedicated input pins with no boot strapping or LED conflicts)
-#define RFID_STATUS_PIN 32 // Input from RFID reader (HIGH = card detected, LOW = no card)
-
-/********** TIMING **********/
-// How often to run a full cycle: read inputs, poll backend, send status.
-unsigned long lastCycleMillis = 0;
-const unsigned long CYCLE_INTERVAL_MS = 5000; // 5 seconds
-
-/********** STATE **********/
-String lastCommandId = "";     // Last processed command, so backend doesn't resend
-bool currentEvOn = false;      // Track current EV relay state
-bool currentP3On = false;      // Track current 3-pin relay state
-bool rfidCardDetected = false; // Track RFID card presence
-
-/********** PZEM INSTANCES **********/
-// Create PZEM instances for each meter
-// PZEM #1: EV Charger (Serial2 on pins 16, 17)
-PZEM004Tv30 pzemEv(Serial2, PZEM_EV_RX_PIN, PZEM_EV_TX_PIN, PZEM_EV_ADDR);
-
-// PZEM #2: 3-Pin Socket (Serial1 on pins 13, 12)
-PZEM004Tv30 pzemP3(Serial1, PZEM_P3_RX_PIN, PZEM_P3_TX_PIN, PZEM_P3_ADDR);
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
+#include <Wire.h>
 
 // Store energy readings
 struct EnergyReading
@@ -81,19 +18,83 @@ struct EnergyReading
     bool ok;
 };
 
+#include "oled_display.h"
+
+/********** CONFIG: WIFI **********/
+const char *WIFI_SSID = "SREEHARI";      // TODO: set
+const char *WIFI_PASSWORD = "447643899"; // TODO: set
+
+/********** CONFIG: BACKEND **********/
+const char *BACKEND_BASE_URL = "https://smart-box-admin.vercel.app"; // TODO: set
+const char *BACKEND_NEXT_COMMAND = "/api/esp/next-command"; // GET
+const char *BACKEND_ACK_ENDPOINT = "/api/esp/ack";          // POST
+const char *DEVICE_ID = "box_001";                // TODO: set
+const char *DEVICE_SECRET = "super-secret-token"; // TODO: set
+
+/********** CONFIG: LOCK PINS **********/
+#define LOCK_CONTROL_PIN 5
+#define LOCK_FEEDBACK_PIN 18
+#define LOCK_ACTIVE_LEVEL HIGH
+
+/********** CONFIG: EV & 3-PIN RELAYS **********/
+#define EV_RELAY_PIN 19
+#define EV_ACTIVE_LEVEL HIGH
+#define P3_RELAY_PIN 23
+#define P3_ACTIVE_LEVEL HIGH
+
+/********** CONFIG: PZEM ENERGY METERS **********/
+#define PZEM_EV_RX_PIN 16
+#define PZEM_EV_TX_PIN 17
+#define PZEM_EV_BAUD 9600
+
+#define PZEM_P3_RX_PIN 13
+#define PZEM_P3_TX_PIN 12
+#define PZEM_P3_BAUD 9600
+
+#define PZEM_EV_ADDR 0xF8
+#define PZEM_P3_ADDR 0xF8
+
+/********** CONFIG: RFID READER **********/
+#define RFID_STATUS_PIN 32
+
+/********** TIMING **********/
+unsigned long lastCycleMillis = 0;
+const unsigned long CYCLE_INTERVAL_MS = 5000;
+unsigned long lastWiFiReconnectAttempt = 0;
+const unsigned long WIFI_RECONNECT_INTERVAL_MS = 30000;
+
+/********** STATE **********/
+String lastCommandId = "";
+bool currentEvOn = false;
+bool currentP3On = false;
+bool rfidCardDetected = false;
+bool isLocked_state = true;
+bool wifiConnected = false;
+String lastError = "";
+int errorCode = 0;
+
+/********** OLED DISPLAY CONFIG **********/
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+/********** PZEM INSTANCES **********/
+PZEM004Tv30 pzemEv(Serial2, PZEM_EV_RX_PIN, PZEM_EV_TX_PIN, PZEM_EV_ADDR);
+PZEM004Tv30 pzemP3(Serial1, PZEM_P3_RX_PIN, PZEM_P3_TX_PIN, PZEM_P3_ADDR);
+
 EnergyReading evEnergyReading = {0.0, 0.0, 0.0, 0.0, false};
 EnergyReading p3EnergyReading = {0.0, 0.0, 0.0, 0.0, false};
 
 /********** PZEM ENERGY READING **********/
 void readEnergyMeters()
 {
-    // Read EV Charger PZEM meter
     float evVoltage = pzemEv.voltage();
     float evCurrent = pzemEv.current();
     float evPower = pzemEv.power();
     float evEnergy = pzemEv.energy();
 
-    // Check if reading was successful (voltage should be > 0 if meter is responding)
     if (!isnan(evVoltage) && evVoltage > 0)
     {
         evEnergyReading.voltage = evVoltage;
@@ -117,13 +118,11 @@ void readEnergyMeters()
         Serial.println("EV Meter - No response");
     }
 
-    // Read 3-Pin Socket PZEM meter
     float p3Voltage = pzemP3.voltage();
     float p3Current = pzemP3.current();
     float p3Power = pzemP3.power();
     float p3Energy = pzemP3.energy();
 
-    // Check if reading was successful
     if (!isnan(p3Voltage) && p3Voltage > 0)
     {
         p3EnergyReading.voltage = p3Voltage;
@@ -154,13 +153,27 @@ void connectWiFi()
     Serial.print("Connecting to WiFi: ");
     Serial.println(WIFI_SSID);
 
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Smart Box ESP32");
+    display.println();
+    display.print("Connecting to WiFi:\n");
+    display.println(WIFI_SSID);
+    display.println();
+    display.print("Please wait");
+    display.display();
+
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     unsigned long startAttempt = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000)
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 5000)
     {
         delay(500);
         Serial.print(".");
+        display.print(".");
+        display.display();
     }
 
     if (WiFi.status() == WL_CONNECTED)
@@ -168,17 +181,22 @@ void connectWiFi()
         Serial.println("\nWiFi connected");
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
+        wifiConnected = true;
+        errorCode = 0;
+        lastError = "";
     }
     else
     {
         Serial.println("\nWiFi connection failed");
+        wifiConnected = false;
+        errorCode = 3;
+        lastError = "WiFi Disconnected";
     }
 }
 
 /********** LOCK CONTROL **********/
 void lockBox()
 {
-    // Simple pulse; adjust timing and logic for your driver.
     digitalWrite(LOCK_CONTROL_PIN, LOCK_ACTIVE_LEVEL);
     delay(500);
     digitalWrite(LOCK_CONTROL_PIN, !LOCK_ACTIVE_LEVEL);
@@ -186,7 +204,6 @@ void lockBox()
 
 void unlockBox()
 {
-    // If your hardware needs a different control (other pin / direction), change here.
     digitalWrite(LOCK_CONTROL_PIN, LOCK_ACTIVE_LEVEL);
     delay(500);
     digitalWrite(LOCK_CONTROL_PIN, !LOCK_ACTIVE_LEVEL);
@@ -195,7 +212,6 @@ void unlockBox()
 bool isLocked()
 {
     int val = digitalRead(LOCK_FEEDBACK_PIN);
-    // Adjust according to your sensor wiring (HIGH vs LOW means locked).
     return (val == HIGH);
 }
 
@@ -203,8 +219,6 @@ bool isLocked()
 bool isRfidCardDetected()
 {
     int val = digitalRead(RFID_STATUS_PIN);
-    // HIGH = card detected, LOW = no card
-    // DEBUG: Print raw GPIO value every 10 cycles
     static int debugCounter = 0;
     if (debugCounter++ % 10 == 0)
     {
@@ -248,16 +262,11 @@ bool getP3Status()
 }
 
 /********** BACKEND: GET NEXT COMMAND **********/
-// Expects backend to return JSON like:
-// { "none": true }
-// or { "commandId": "abc123", "actions": { "lock": "LOCK", "ev": true, "p3": false } }
 bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &evOn, bool &p3Set, bool &p3On)
 {
     if (WiFi.status() != WL_CONNECTED)
     {
-        connectWiFi();
-        if (WiFi.status() != WL_CONNECTED)
-            return false;
+        return false;
     }
     HTTPClient http;
     String url = String(BACKEND_BASE_URL) + BACKEND_NEXT_COMMAND +
@@ -306,12 +315,11 @@ bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &
 
     if (doc["none"] | false)
     {
-        return false; // No new command
+        return false;
     }
 
     commandId = doc["commandId"].as<String>();
 
-    // Parse actions object
     lockAction = "";
     evSet = false;
     p3Set = false;
@@ -342,8 +350,6 @@ bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &
 }
 
 /********** BACKEND: SEND ACK + STATUS **********/
-// Sends current status and the result of the last command.
-// Includes real PZEM energy measurements.
 bool sendStatus(const String &commandId,
                 bool commandSuccess,
                 bool locked,
@@ -352,9 +358,7 @@ bool sendStatus(const String &commandId,
 {
     if (WiFi.status() != WL_CONNECTED)
     {
-        connectWiFi();
-        if (WiFi.status() != WL_CONNECTED)
-            return false;
+        return false;
     }
     HTTPClient http;
     String url = String(BACKEND_BASE_URL) + BACKEND_ACK_ENDPOINT;
@@ -374,18 +378,15 @@ bool sendStatus(const String &commandId,
     doc["success"] = commandSuccess;
     doc["timestamp"] = (long long)millis();
 
-    // Device state
     JsonObject state = doc.createNestedObject("state");
     state["lock"] = locked ? "LOCKED" : "UNLOCKED";
     state["ev"] = evOn;
     state["p3"] = p3On;
     state["rfid"] = rfidCardDetected;
 
-    // Energy measurements from PZEM meters
     JsonObject energy = doc.createNestedObject("energy");
     energy["ok"] = (evEnergyReading.ok && p3EnergyReading.ok);
 
-    // EV meter data
     JsonObject evMeter = energy.createNestedObject("evmeter");
     evMeter["voltage"] = evEnergyReading.voltage;
     evMeter["current"] = evEnergyReading.current;
@@ -393,7 +394,6 @@ bool sendStatus(const String &commandId,
     evMeter["energy"] = evEnergyReading.energy;
     evMeter["ok"] = evEnergyReading.ok;
 
-    // 3-pin meter data
     JsonObject p3Meter = energy.createNestedObject("p3meter");
     p3Meter["voltage"] = p3EnergyReading.voltage;
     p3Meter["current"] = p3EnergyReading.current;
@@ -435,42 +435,62 @@ void setup()
 
     // Lock pins
     pinMode(LOCK_CONTROL_PIN, OUTPUT);
-    digitalWrite(LOCK_CONTROL_PIN, !LOCK_ACTIVE_LEVEL); // idle state
-    pinMode(LOCK_FEEDBACK_PIN, INPUT_PULLUP);           // change if needed
+    digitalWrite(LOCK_CONTROL_PIN, !LOCK_ACTIVE_LEVEL);
+    pinMode(LOCK_FEEDBACK_PIN, INPUT_PULLUP);
 
     // RFID status pin
-    pinMode(RFID_STATUS_PIN, INPUT_PULLUP); // Read RFID card detection status
+    pinMode(RFID_STATUS_PIN, INPUT_PULLUP);
 
     // Relay pins
     pinMode(EV_RELAY_PIN, OUTPUT);
-    digitalWrite(EV_RELAY_PIN, !EV_ACTIVE_LEVEL); // idle state
+    digitalWrite(EV_RELAY_PIN, !EV_ACTIVE_LEVEL);
     currentEvOn = false;
 
     pinMode(P3_RELAY_PIN, OUTPUT);
-    digitalWrite(P3_RELAY_PIN, !P3_ACTIVE_LEVEL); // idle state
+    digitalWrite(P3_RELAY_PIN, !P3_ACTIVE_LEVEL);
     currentP3On = false;
 
     // Initialize PZEM serial ports
-    // PZEM #1 for EV Charger on Serial2 (pins 16, 17)
     Serial2.begin(PZEM_EV_BAUD, SERIAL_8N1, PZEM_EV_RX_PIN, PZEM_EV_TX_PIN);
     Serial.println("PZEM #1 (EV) initialized on Serial2");
-
-    // PZEM #2 for 3-Pin Socket on Serial1 (pins 13, 12)
     Serial1.begin(PZEM_P3_BAUD, SERIAL_8N1, PZEM_P3_RX_PIN, PZEM_P3_TX_PIN);
     Serial.println("PZEM #2 (3-Pin) initialized on Serial1");
 
-    connectWiFi();
+    // Initialize OLED Display
+    initializeDisplay();
 
-    Serial.println("Smart box ESP32 started (backend mode with EV & 3-pin relay control + PZEM energy meters + RFID)");
+    connectWiFi();
+    wifiConnected = (WiFi.status() == WL_CONNECTED);
+    lastWiFiReconnectAttempt = millis();
+
+    Serial.println("Smart box ESP32 started");
 }
 
 void loop()
 {
     unsigned long now = millis();
 
+    // WiFi reconnect logic
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        wifiConnected = false;
+        if (now - lastWiFiReconnectAttempt >= WIFI_RECONNECT_INTERVAL_MS)
+        {
+            lastWiFiReconnectAttempt = now;
+            connectWiFi();
+        }
+    }
+    else
+    {
+        wifiConnected = true;
+    }
+
     if (now - lastCycleMillis >= CYCLE_INTERVAL_MS)
     {
         lastCycleMillis = now;
+
+        // FIX: Read energy meters at the start of every cycle
+        readEnergyMeters();
 
         // 1) Read current lock state before any commands
         bool lockedBefore = isLocked();
@@ -489,7 +509,6 @@ void loop()
             Serial.print("Received command: ");
             Serial.println(cmdId);
 
-            // Handle lock command
             if (!lockAction.isEmpty())
             {
                 Serial.print("Lock action: ");
@@ -509,7 +528,6 @@ void loop()
                 }
             }
 
-            // Handle EV relay command
             if (evSet)
             {
                 Serial.print("EV relay command: ");
@@ -517,7 +535,6 @@ void loop()
                 setEvRelay(evOn);
             }
 
-            // Handle 3-pin relay command
             if (p3Set)
             {
                 Serial.print("3-Pin relay command: ");
@@ -528,12 +545,13 @@ void loop()
             lastCommandId = cmdId;
         }
 
-        // 3) Read energy meters
-        readEnergyMeters(); // 4) Read final states after all commands executed
+        // 4) Read final states after all commands executed
         bool lockedAfter = isLocked();
         bool evStatus = getEvStatus();
         bool p3Status = getP3Status();
         rfidCardDetected = isRfidCardDetected();
+        isLocked_state = lockedAfter;
+        wifiConnected = (WiFi.status() == WL_CONNECTED);
 
         Serial.print("Lock state after cmd: ");
         Serial.println(lockedAfter ? "LOCKED" : "UNLOCKED");
@@ -553,8 +571,18 @@ void loop()
         if (!ok)
         {
             Serial.println("Failed to send status to backend");
+            errorCode = 2;
+            lastError = "Backend Timeout";
+        }
+        else
+        {
+            errorCode = 0;
+            lastError = "";
         }
     }
+
+    // Update OLED display continuously
+    updateDisplay();
 
     delay(50);
 }
