@@ -34,7 +34,7 @@ const char *DEVICE_SECRET = "super-secret-token"; // TODO: set
 /********** CONFIG: LOCK PINS **********/
 #define LOCK_CONTROL_PIN 5
 #define LOCK_FEEDBACK_PIN 18
-#define LOCK_ACTIVE_LEVEL HIGH
+#define LOCK_ACTIVE_LEVEL LOW
 
 /********** CONFIG: EV & 3-PIN RELAYS **********/
 #define EV_RELAY_PIN 19
@@ -197,15 +197,13 @@ void connectWiFi()
 /********** LOCK CONTROL **********/
 void lockBox()
 {
-    digitalWrite(LOCK_CONTROL_PIN, LOCK_ACTIVE_LEVEL);
-    delay(500);
     digitalWrite(LOCK_CONTROL_PIN, !LOCK_ACTIVE_LEVEL);
 }
 
 void unlockBox()
 {
     digitalWrite(LOCK_CONTROL_PIN, LOCK_ACTIVE_LEVEL);
-    delay(500);
+    delay(1000);
     digitalWrite(LOCK_CONTROL_PIN, !LOCK_ACTIVE_LEVEL);
 }
 
@@ -231,6 +229,12 @@ bool isRfidCardDetected()
 /********** RELAY CONTROL: EV & 3-PIN **********/
 void setEvRelay(bool on)
 {
+    // if turning on ev relay then reset energy reading for ev
+    if (on && !currentEvOn)
+    {
+        pzemEv.resetEnergy();
+        delay(500);
+    }
     int level = on ? EV_ACTIVE_LEVEL : !EV_ACTIVE_LEVEL;
     digitalWrite(EV_RELAY_PIN, level);
     currentEvOn = on;
@@ -242,6 +246,12 @@ void setEvRelay(bool on)
 
 void setP3Relay(bool on)
 {
+    // if turning on 3-pin relay then reset energy reading for 3-pin
+    if (on && !currentP3On)
+    {
+        pzemP3.resetEnergy();
+        delay(500);
+    }
     int level = on ? P3_ACTIVE_LEVEL : !P3_ACTIVE_LEVEL;
     digitalWrite(P3_RELAY_PIN, level);
     currentP3On = on;
