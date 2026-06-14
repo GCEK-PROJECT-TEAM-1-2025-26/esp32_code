@@ -47,8 +47,8 @@ const char *DEVICE_SECRET = "super-secret-token"; // TODO: set
 #define PZEM_EV_TX_PIN 17
 #define PZEM_EV_BAUD 9600
 
-#define PZEM_P3_RX_PIN 13
-#define PZEM_P3_TX_PIN 12
+#define PZEM_P3_RX_PIN 26
+#define PZEM_P3_TX_PIN 27
 #define PZEM_P3_BAUD 9600
 
 #define PZEM_EV_ADDR 0xF8
