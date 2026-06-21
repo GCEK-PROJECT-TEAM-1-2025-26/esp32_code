@@ -20,7 +20,9 @@ extern String lastError;
 extern int errorCode;
 extern EnergyReading evEnergyReading;
 extern EnergyReading p3EnergyReading;
-extern const char *DEVICE_ID;
+extern String deviceId;
+extern bool isAPMode;
+extern String apSSID;
 extern const unsigned long CYCLE_INTERVAL_MS;
 
 // Initialize OLED display
@@ -81,7 +83,7 @@ void displayMainStatus()
     display.setCursor(0, 0);
 
     display.print("BOX: ");
-    display.println(DEVICE_ID);
+    display.println(deviceId);
     display.print("WiFi: ");
     display.println(wifiConnected ? "ON" : "OFF");
 
@@ -183,7 +185,7 @@ void displayNetworkStatus()
     display.print("WiFi: ");
     display.println(wifiConnected ? "CONNECTED" : "DISCONNECTED");
     display.print("Device: ");
-    display.println(DEVICE_ID);
+    display.println(deviceId);
     display.print("Status: ");
     if (errorCode == 0)
         display.println("OK");
@@ -231,12 +233,39 @@ void displayDiagnostics()
     display.display();
 }
 
+// Display AP setup instructions
+void displayAPSetup(String ssid, String ip)
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+
+    display.println("=== SETUP MODE ===");
+    display.println();
+    display.println("Connect to WiFi AP:");
+    display.print("SSID: ");
+    display.println(ssid);
+    display.println();
+    display.println("Open app to configure");
+    display.print("IP: ");
+    display.println(ip);
+
+    display.display();
+}
+
 // Rotate through display screens every 5 seconds
 static unsigned long lastDisplayChange = 0;
 static int currentDisplayScreen = 0;
 
 void updateDisplay()
 {
+    if (isAPMode)
+    {
+        displayAPSetup(apSSID, "192.168.4.1");
+        return;
+    }
+
     unsigned long now = millis();
 
     if (now - lastDisplayChange >= 5000)
