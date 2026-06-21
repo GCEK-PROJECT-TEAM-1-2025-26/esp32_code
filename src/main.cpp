@@ -7,6 +7,8 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
 #include <Wire.h>
+#include <Preferences.h>
+#include <WebServer.h>
 
 // Store energy readings
 struct EnergyReading
@@ -20,16 +22,133 @@ struct EnergyReading
 
 #include "oled_display.h"
 
-/********** CONFIG: WIFI **********/
-const char *WIFI_SSID = "SREEHARI";      // TODO: set
-const char *WIFI_PASSWORD = "447643899"; // TODO: set
+/********** CONFIG: WIFI & BACKEND (LOADED DYNAMICALLY) **********/
+String wifiSsid = "";
+String wifiPassword = "";
+String deviceId = "";
+String deviceSecret = "";
+String boxLocation = "";
 
-/********** CONFIG: BACKEND **********/
 const char *BACKEND_BASE_URL = "https://smart-box-admin.vercel.app"; // TODO: set
 const char *BACKEND_NEXT_COMMAND = "/api/esp/next-command"; // GET
 const char *BACKEND_ACK_ENDPOINT = "/api/esp/ack";          // POST
-const char *DEVICE_ID = "box_001";                // TODO: set
-const char *DEVICE_SECRET = "super-secret-token"; // TODO: set
+
+bool isAPMode = false;
+String apSSID = "SmartBox-Setup";
+WebServer webServer(80);
+Preferences preferences;
+
+void saveConfiguration(String ssid, String pass, String devId, String devSec, String loc)
+{
+    preferences.begin("smartbox", false);
+    preferences.putString("ssid", ssid);
+    preferences.putString("password", pass);
+    preferences.putString("deviceId", devId);
+    preferences.putString("deviceSecret", devSec);
+    preferences.putString("location", loc);
+    preferences.end();
+    Serial.println("Configuration saved!");
+}
+
+void loadConfiguration()
+{
+    preferences.begin("smartbox", true);
+    wifiSsid = preferences.getString("ssid", "");
+    wifiPassword = preferences.getString("password", "");
+    deviceId = preferences.getString("deviceId", "");
+    deviceSecret = preferences.getString("deviceSecret", "");
+    boxLocation = preferences.getString("location", "");
+    preferences.end();
+    Serial.println("Loaded Configuration:");
+    Serial.print("  SSID: "); Serial.println(wifiSsid);
+    Serial.print("  Device ID: "); Serial.println(deviceId);
+    Serial.print("  Location: "); Serial.println(boxLocation);
+}
+
+void handleScan()
+{
+    Serial.println("Scanning networks...");
+    int n = WiFi.scanNetworks();
+    Serial.print("Scan complete. Found: ");
+    Serial.println(n);
+    
+    JsonDocument doc;
+    for (int i = 0; i < n; ++i)
+    {
+        doc["networks"][i]["ssid"] = WiFi.SSID(i);
+        doc["networks"][i]["rssi"] = WiFi.RSSI(i);
+        doc["networks"][i]["open"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    webServer.send(200, "application/json", response);
+}
+
+void handleConfigure()
+{
+    if (!webServer.hasArg("plain"))
+    {
+        webServer.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Body missing\"}");
+        return;
+    }
+    
+    String body = webServer.arg("plain");
+    Serial.print("Configure payload received: ");
+    Serial.println(body);
+    
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, body);
+    if (err)
+    {
+        webServer.send(400, "application/json", "{\"status\":\"error\",\"message\":\"JSON parse error\"}");
+        return;
+    }
+    
+    if (!doc["ssid"].is<String>() || !doc["deviceId"].is<String>())
+    {
+        webServer.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing ssid or deviceId\"}");
+        return;
+    }
+    
+    String ssid = doc["ssid"].as<String>();
+    String password = doc["password"] | "";
+    String devId = doc["deviceId"].as<String>();
+    String devSec = doc["deviceSecret"] | "super-secret-token";
+    String loc = doc["location"] | "";
+    
+    saveConfiguration(ssid, password, devId, devSec, loc);
+    
+    webServer.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Configuration saved successfully. Rebooting...\"}");
+    delay(2000);
+    ESP.restart();
+}
+
+void startAPMode()
+{
+    isAPMode = true;
+    WiFi.mode(WIFI_AP);
+    
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    apSSID = "SmartBox-Setup-" + mac.substring(mac.length() - 4);
+    
+    WiFi.softAP(apSSID.c_str());
+    
+    Serial.println("\n--- Setup Mode Activated ---");
+    Serial.print("SSID: ");
+    Serial.println(apSSID);
+    Serial.print("Local IP: ");
+    Serial.println(WiFi.softAPIP());
+    
+    webServer.on("/scan", HTTP_GET, handleScan);
+    webServer.on("/configure", HTTP_POST, handleConfigure);
+    webServer.begin();
+    
+    wifiConnected = false;
+    errorCode = 4;
+    lastError = "Setup Mode Active";
+}
 
 /********** CONFIG: LOCK PINS **********/
 #define LOCK_CONTROL_PIN 5
@@ -151,7 +270,7 @@ void readEnergyMeters()
 void connectWiFi()
 {
     Serial.print("Connecting to WiFi: ");
-    Serial.println(WIFI_SSID);
+    Serial.println(wifiSsid);
 
     display.clearDisplay();
     display.setTextSize(1);
@@ -160,15 +279,15 @@ void connectWiFi()
     display.println("Smart Box ESP32");
     display.println();
     display.print("Connecting to WiFi:\n");
-    display.println(WIFI_SSID);
+    display.println(wifiSsid);
     display.println();
     display.print("Please wait");
     display.display();
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
     unsigned long startAttempt = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 5000)
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000)
     {
         delay(500);
         Serial.print(".");
@@ -280,7 +399,7 @@ bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &
     }
     HTTPClient http;
     String url = String(BACKEND_BASE_URL) + BACKEND_NEXT_COMMAND +
-                 "?deviceId=" + DEVICE_ID +
+                 "?deviceId=" + deviceId +
                  "&lastCommandId=" + lastCommandId;
     Serial.print("GET ");
     Serial.println(url);
@@ -288,8 +407,8 @@ bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &
     client.setInsecure(); // TODO: Fix with proper CA certificate later
 
     http.begin(client, url);
-    http.addHeader("x-device-id", DEVICE_ID);
-    http.addHeader("x-device-secret", DEVICE_SECRET);
+    http.addHeader("x-device-id", deviceId);
+    http.addHeader("x-device-secret", deviceSecret);
 
     int httpCode = http.GET();
     if (httpCode <= 0)
@@ -314,7 +433,7 @@ bool fetchNextCommand(String &commandId, String &lockAction, bool &evSet, bool &
     Serial.print("Command payload: ");
     Serial.println(payload);
 
-    StaticJsonDocument<512> doc;
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
     if (err)
     {
@@ -379,37 +498,33 @@ bool sendStatus(const String &commandId,
 
     http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
-    http.addHeader("x-device-id", DEVICE_ID);
-    http.addHeader("x-device-secret", DEVICE_SECRET);
+    http.addHeader("x-device-id", deviceId);
+    http.addHeader("x-device-secret", deviceSecret);
 
-    StaticJsonDocument<768> doc;
-    doc["deviceId"] = DEVICE_ID;
+    JsonDocument doc;
+    doc["deviceId"] = deviceId;
     doc["commandId"] = commandId;
     doc["success"] = commandSuccess;
     doc["timestamp"] = (long long)millis();
 
-    JsonObject state = doc.createNestedObject("state");
-    state["lock"] = locked ? "LOCKED" : "UNLOCKED";
-    state["ev"] = evOn;
-    state["p3"] = p3On;
-    state["rfid"] = rfidCardDetected;
+    doc["state"]["lock"] = locked ? "LOCKED" : "UNLOCKED";
+    doc["state"]["ev"] = evOn;
+    doc["state"]["p3"] = p3On;
+    doc["state"]["rfid"] = rfidCardDetected;
 
-    JsonObject energy = doc.createNestedObject("energy");
-    energy["ok"] = (evEnergyReading.ok && p3EnergyReading.ok);
+    doc["energy"]["ok"] = (evEnergyReading.ok && p3EnergyReading.ok);
 
-    JsonObject evMeter = energy.createNestedObject("evmeter");
-    evMeter["voltage"] = evEnergyReading.voltage;
-    evMeter["current"] = evEnergyReading.current;
-    evMeter["power"] = evEnergyReading.power;
-    evMeter["energy"] = evEnergyReading.energy;
-    evMeter["ok"] = evEnergyReading.ok;
+    doc["energy"]["evmeter"]["voltage"] = evEnergyReading.voltage;
+    doc["energy"]["evmeter"]["current"] = evEnergyReading.current;
+    doc["energy"]["evmeter"]["power"] = evEnergyReading.power;
+    doc["energy"]["evmeter"]["energy"] = evEnergyReading.energy;
+    doc["energy"]["evmeter"]["ok"] = evEnergyReading.ok;
 
-    JsonObject p3Meter = energy.createNestedObject("p3meter");
-    p3Meter["voltage"] = p3EnergyReading.voltage;
-    p3Meter["current"] = p3EnergyReading.current;
-    p3Meter["power"] = p3EnergyReading.power;
-    p3Meter["energy"] = p3EnergyReading.energy;
-    p3Meter["ok"] = p3EnergyReading.ok;
+    doc["energy"]["p3meter"]["voltage"] = p3EnergyReading.voltage;
+    doc["energy"]["p3meter"]["current"] = p3EnergyReading.current;
+    doc["energy"]["p3meter"]["power"] = p3EnergyReading.power;
+    doc["energy"]["p3meter"]["energy"] = p3EnergyReading.energy;
+    doc["energy"]["p3meter"]["ok"] = p3EnergyReading.ok;
 
     String body;
     serializeJson(doc, body);
@@ -469,15 +584,41 @@ void setup()
     // Initialize OLED Display
     initializeDisplay();
 
-    connectWiFi();
-    wifiConnected = (WiFi.status() == WL_CONNECTED);
-    lastWiFiReconnectAttempt = millis();
+    loadConfiguration();
+
+    if (wifiSsid.isEmpty() || deviceId.isEmpty())
+    {
+        Serial.println("No configuration found. Entering Setup Mode.");
+        startAPMode();
+    }
+    else
+    {
+        connectWiFi();
+        wifiConnected = (WiFi.status() == WL_CONNECTED);
+        if (!wifiConnected)
+        {
+            Serial.println("WiFi connection failed during startup. Falling back to Setup Mode.");
+            startAPMode();
+        }
+        else
+        {
+            lastWiFiReconnectAttempt = millis();
+        }
+    }
 
     Serial.println("Smart box ESP32 started");
 }
 
 void loop()
 {
+    if (isAPMode)
+    {
+        webServer.handleClient();
+        updateDisplay();
+        delay(50);
+        return;
+    }
+
     unsigned long now = millis();
 
     // WiFi reconnect logic
