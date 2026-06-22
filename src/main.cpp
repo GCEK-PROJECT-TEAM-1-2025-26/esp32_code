@@ -9,6 +9,7 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <WebServer.h>
+#include <PCF8575.h>     // 16-bit I2C I/O expander (PCF8575TS)
 
 // Store energy readings
 struct EnergyReading
@@ -39,10 +40,333 @@ const char *BACKEND_ACK_ENDPOINT = "/api/esp/ack";          // POST
 #define FACTORY_RESET_PIN    0
 #define FACTORY_RESET_HOLD_MS 5000   // Hold 5 seconds to trigger reset
 
+/********** CONFIG: PCF8575 KEYPAD **********/
+// PCF8575TS I2C address — set by A0/A1/A2 pins:
+//   A0=A1=A2=GND → 0x20  (default — most common)
+//   Change here if you've tied any address pins HIGH
+#define PCF8575_I2C_ADDR    0x20
+
+// Keypad wiring on PCF8575 (lower byte only; upper byte P10-P17 is free)
+//   Rows    → P0, P1, P2, P3   (bits 0-3,  driven LOW one at a time)
+//   Columns → P4, P5, P6, P7   (bits 4-7,  read back; PCF pull-ups keep them HIGH)
+//
+// Physical 4x4 matrix layout:
+//   COL:      P4    P5    P6    P7
+//   ROW P0: [ 1 ]  [ 2 ]  [ 3 ]  [ A ]
+//   ROW P1: [ 4 ]  [ 5 ]  [ 6 ]  [ B ]
+//   ROW P2: [ 7 ]  [ 8 ]  [ 9 ]  [ C ]
+//   ROW P3: [ * ]  [ 0 ]  [ # ]  [ D ]
+
+const char KEYPAD_MAP[4][4] = {
+    {'1', '2', '3', 'A'},
+    {'4', '5', '6', 'B'},
+    {'7', '8', '9', 'C'},
+    {'*', '0', '#', 'D'}
+};
+
+// Debounce — minimum ms a key must be held before it counts
+#define KEYPAD_DEBOUNCE_MS  50
+
 bool isAPMode = false;
 String apSSID = "SmartBox-Setup";
 WebServer webServer(80);
 Preferences preferences;
+
+/********** PCF8575 KEYPAD DRIVER **********/
+PCF8575 pcf8575(PCF8575_I2C_ADDR);
+bool keypadReady = false;      // set true in setup() if PCF8575 found on I2C bus
+char lastKeyPressed = 0;       // 0 = none
+unsigned long keyDebounceTime = 0;
+
+// Scan the 4x4 matrix and return the pressed key char, or 0 if none.
+// Uses the quasi-bidirectional model of PCF8575:
+//   - Set all row+col pins HIGH (idle)
+//   - Pull one row LOW at a time
+//   - Read back cols: a LOW col means that key is pressed
+char scanKeypad()
+{
+    if (!keypadReady) return 0;
+
+    for (uint8_t row = 0; row < 4; row++)
+    {
+        // Build 16-bit output word:
+        //   Lower byte bits 0-3 = rows:  drive current row LOW, rest HIGH
+        //   Lower byte bits 4-7 = cols:  all HIGH (inputs via quasi-bidirectional)
+        //   Upper byte (P10-P17):        all HIGH (unused, keep as inputs)
+        uint16_t outWord = 0xFFFF;           // start: all HIGH
+        outWord &= ~(1 << row);              // pull selected row LOW (bit 0-3)
+
+        pcf8575.write16(outWord);
+        delayMicroseconds(10);               // let the line settle
+
+        uint16_t readBack = pcf8575.read16();
+
+        // Check each column (bits 4-7 of lower byte)
+        for (uint8_t col = 0; col < 4; col++)
+        {
+            bool colLow = !(readBack & (1 << (col + 4)));
+            if (colLow)
+            {
+                // Debounce: wait and confirm still pressed
+                delay(KEYPAD_DEBOUNCE_MS);
+                readBack = pcf8575.read16();
+                if (!(readBack & (1 << (col + 4))))
+                {
+                    // Restore idle state before returning
+                    pcf8575.write16(0xFFFF);
+                    return KEYPAD_MAP[row][col];
+                }
+            }
+        }
+    }
+
+    // Restore idle state
+    pcf8575.write16(0xFFFF);
+    return 0;  // no key pressed
+}
+
+// ─── PIN Code System ────────────────────────────────────────────────────────
+
+// Default PIN — stored and read from Preferences so it can be changed later.
+// Change this to your preferred default; it is written once on first boot.
+#define DEFAULT_PIN  "1234"
+#define MAX_PIN_LEN  8
+
+String keypadPIN = DEFAULT_PIN;  // loaded from Preferences in setup()
+String pinBuffer = "";           // digits typed so far
+bool pinEntryActive = false;     // true while user is mid-entry
+unsigned long pinTimeoutStart = 0;
+const unsigned long PIN_TIMEOUT_MS = 15000; // 15 s idle → auto-clear buffer
+
+// Show the current PIN buffer on OLED as asterisks
+void showPinEntry()
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(0, 0);
+    display.println("=== SMART BOX ===");
+    display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+
+    display.setCursor(0, 16);
+    display.println("Enter PIN then [#]");
+
+    // Show masked input  e.g.  [ * * _ _ ]
+    display.setCursor(20, 32);
+    display.setTextSize(2);
+    String masked = "";
+    for (int i = 0; i < (int)pinBuffer.length(); i++) masked += "*";
+    for (int i = pinBuffer.length(); i < 4; i++) masked += "_";
+    display.print(masked);
+
+    display.setTextSize(1);
+    display.setCursor(0, 56);
+    display.print("[*] Clear  [#] OK");
+    display.display();
+}
+
+// Show a brief result message (correct/wrong) then return to normal display
+void showPinResult(bool correct)
+{
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(correct ? 4 : 8, 20);
+    display.println(correct ? "GRANTED!" : "WRONG PIN");
+    display.setTextSize(1);
+    display.setCursor(0, 50);
+    display.println(correct ? "Door opening..." : "Try again");
+    display.display();
+    delay(1800);
+}
+
+// Show a brief action confirmation on OLED
+void showKeyAction(const char* line1, const char* line2 = "")
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 10);
+    display.println(line1);
+    if (strlen(line2) > 0)
+    {
+        display.setCursor(0, 26);
+        display.println(line2);
+    }
+    display.display();
+    delay(1200);
+}
+
+// Load PIN from Preferences (called in setup after loadConfiguration)
+void loadKeypadPIN()
+{
+    preferences.begin("smartbox", true);
+    keypadPIN = preferences.getString("kpad_pin", DEFAULT_PIN);
+    preferences.end();
+    Serial.print("[KEYPAD] PIN loaded (len=");
+    Serial.print(keypadPIN.length());
+    Serial.println(")");
+}
+
+// Save a new PIN to Preferences
+void saveKeypadPIN(const String& newPin)
+{
+    preferences.begin("smartbox", false);
+    preferences.putString("kpad_pin", newPin);
+    preferences.end();
+    keypadPIN = newPin;
+    Serial.println("[KEYPAD] New PIN saved.");
+}
+
+// Main keypad handler — call once per loop() iteration.
+// Key mapping:
+//   0-9  → Append digit to PIN buffer
+//   *    → Clear / cancel buffer
+//   #    → Submit buffer as PIN (unlock if correct)
+//   A    → Toggle EV Charger      (only when box is unlocked)
+//   B    → Toggle 3-Pin Socket    (only when box is unlocked)
+//   C    → Lock the box
+//   D    → Show live status on OLED
+void handleKeypadInput()
+{
+    if (!keypadReady) return;
+
+    char key = scanKeypad();
+
+    // Auto-clear buffer after PIN_TIMEOUT_MS of idle
+    if (pinEntryActive && (millis() - pinTimeoutStart) > PIN_TIMEOUT_MS)
+    {
+        pinBuffer = "";
+        pinEntryActive = false;
+        Serial.println("[KEYPAD] PIN entry timed out — buffer cleared");
+        return;
+    }
+
+    if (key == 0 || key == lastKeyPressed)
+    {
+        if (key == 0) lastKeyPressed = 0;
+        return;
+    }
+    lastKeyPressed = key;
+
+    Serial.print("[KEYPAD] Key: ");
+    Serial.println(key);
+
+    // ── Digit keys: build PIN buffer ──────────────────────────────────────────
+    if (key >= '0' && key <= '9')
+    {
+        if (pinBuffer.length() < MAX_PIN_LEN)
+        {
+            pinBuffer += key;
+            pinEntryActive = true;
+            pinTimeoutStart = millis();
+        }
+        showPinEntry();
+        return;
+    }
+
+    // ── * : Clear buffer ──────────────────────────────────────────────────────
+    if (key == '*')
+    {
+        pinBuffer = "";
+        pinEntryActive = false;
+        Serial.println("[KEYPAD] Buffer cleared");
+        showKeyAction("Cancelled", "Buffer cleared");
+        return;
+    }
+
+    // ── # : Submit PIN ────────────────────────────────────────────────────────
+    if (key == '#')
+    {
+        if (pinBuffer.length() == 0)
+        {
+            showKeyAction("Enter digits", "then press #");
+            return;
+        }
+
+        bool correct = (pinBuffer == keypadPIN);
+        Serial.print("[KEYPAD] PIN attempt: ");
+        Serial.println(correct ? "CORRECT" : "WRONG");
+
+        pinBuffer = "";
+        pinEntryActive = false;
+
+        showPinResult(correct);
+
+        if (correct)
+        {
+            // Pulse the solenoid to open the door
+            unlockBox();
+            isLocked_state = false;
+            Serial.println("[KEYPAD] Door unlocked via PIN");
+        }
+        return;
+    }
+
+    // ── A : Toggle EV Charger ─────────────────────────────────────────────────
+    if (key == 'A')
+    {
+        if (isLocked_state)
+        {
+            showKeyAction("Box is LOCKED", "Enter PIN first");
+            return;
+        }
+        bool newState = !currentEvOn;
+        setEvRelay(newState);
+        Serial.print("[KEYPAD] EV Charger ");
+        Serial.println(newState ? "ON" : "OFF");
+        showKeyAction("EV Charger:", newState ? "TURNED ON" : "TURNED OFF");
+        return;
+    }
+
+    // ── B : Toggle 3-Pin Socket ───────────────────────────────────────────────
+    if (key == 'B')
+    {
+        if (isLocked_state)
+        {
+            showKeyAction("Box is LOCKED", "Enter PIN first");
+            return;
+        }
+        bool newState = !currentP3On;
+        setP3Relay(newState);
+        Serial.print("[KEYPAD] 3-Pin Socket ");
+        Serial.println(newState ? "ON" : "OFF");
+        showKeyAction("3-Pin Socket:", newState ? "TURNED ON" : "TURNED OFF");
+        return;
+    }
+
+    // ── C : Lock the box ──────────────────────────────────────────────────────
+    if (key == 'C')
+    {
+        // Turn off chargers before locking
+        setEvRelay(false);
+        setP3Relay(false);
+        lockBox();
+        isLocked_state = true;
+        Serial.println("[KEYPAD] Box locked via keypad");
+        showKeyAction("Box LOCKED", "All off");
+        return;
+    }
+
+    // ── D : Show live status ──────────────────────────────────────────────────
+    if (key == 'D')
+    {
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 0);
+        display.println("=== STATUS ===");
+        display.print("Lock : "); display.println(isLocked_state ? "LOCKED" : "OPEN");
+        display.print("EV   : "); display.println(currentEvOn   ? "ON" : "OFF");
+        display.print("3-Pin: "); display.println(currentP3On   ? "ON" : "OFF");
+        display.print("WiFi : "); display.println(wifiConnected  ? "OK" : "NO");
+        display.print("Box  : "); display.println(deviceId);
+        display.display();
+        delay(3000);
+        return;
+    }
+}
 
 void saveConfiguration(String ssid, String pass, String devId, String devSec, String loc)
 {
@@ -669,12 +993,31 @@ void setup()
     // Initialize OLED Display
     initializeDisplay();
 
+    // Initialize PCF8575 keypad expander
+    // Wire is already started by Adafruit_SSD1306 via initializeDisplay()
+    // PCF8575 shares the same I2C bus (SDA=GPIO21, SCL=GPIO22)
+    pcf8575.begin();   // initialise the expander
+    // Verify the chip is actually responding on the bus
+    Wire.beginTransmission(PCF8575_I2C_ADDR);
+    if (Wire.endTransmission() == 0)
+    {
+        keypadReady = true;
+        pcf8575.write16(0xFFFF);  // all pins HIGH (idle / input mode)
+        Serial.println("PCF8575 keypad expander found at 0x20 ✓");
+    }
+    else
+    {
+        keypadReady = false;
+        Serial.println("WARNING: PCF8575 not found on I2C bus — keypad disabled");
+    }
+
     // ── Check for factory reset BEFORE loading config ──────────────────────
     // If user holds the button at power-on, wipe config immediately
     checkFactoryReset();
     // ───────────────────────────────────────────────────────────────────────
 
     loadConfiguration();
+    loadKeypadPIN();
 
     if (wifiSsid.isEmpty() || deviceId.isEmpty())
     {
@@ -712,6 +1055,10 @@ void loop()
     // ── Factory reset check in normal operation ─────────────────────────────
     // User can also trigger reset while the device is running normally
     checkFactoryReset();
+    // ───────────────────────────────────────────────────────────────────────
+
+    // ── Keypad: handle PIN entry and action keys ─────────────────────────────
+    handleKeypadInput();
     // ───────────────────────────────────────────────────────────────────────
 
     unsigned long now = millis();
