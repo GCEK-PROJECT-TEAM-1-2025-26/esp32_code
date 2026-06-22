@@ -33,6 +33,12 @@ const char *BACKEND_BASE_URL = "https://smart-box-admin.vercel.app"; // TODO: se
 const char *BACKEND_NEXT_COMMAND = "/api/esp/next-command"; // GET
 const char *BACKEND_ACK_ENDPOINT = "/api/esp/ack";          // POST
 
+/********** CONFIG: FACTORY RESET BUTTON **********/
+// GPIO 0 = onboard BOOT button on most ESP32 devkits (active LOW, no extra hardware needed)
+// To use a dedicated external button: wire it between your chosen GPIO and GND
+#define FACTORY_RESET_PIN    0
+#define FACTORY_RESET_HOLD_MS 5000   // Hold 5 seconds to trigger reset
+
 bool isAPMode = false;
 String apSSID = "SmartBox-Setup";
 WebServer webServer(80);
@@ -48,6 +54,82 @@ void saveConfiguration(String ssid, String pass, String devId, String devSec, St
     preferences.putString("location", loc);
     preferences.end();
     Serial.println("Configuration saved!");
+}
+
+// ─── Factory Reset ──────────────────────────────────────────────────────────
+void factoryReset()
+{
+    Serial.println("\n!!! FACTORY RESET TRIGGERED !!!");
+
+    // Wipe all stored configuration
+    preferences.begin("smartbox", false);
+    preferences.clear();
+    preferences.end();
+    Serial.println("All preferences cleared.");
+
+    // Show final message on OLED
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("=== FACTORY RESET ===");
+    display.println();
+    display.println("All config erased.");
+    display.println("Rebooting into");
+    display.println("Setup Mode...");
+    display.display();
+
+    delay(2500);
+    ESP.restart();
+}
+
+// Check if the factory reset button has been held long enough.
+// Call this in setup() and optionally in loop().
+// Returns true if reset was triggered (device will restart, so this won't return).
+void checkFactoryReset()
+{
+    if (digitalRead(FACTORY_RESET_PIN) == HIGH)
+    {
+        // Button not pressed (active LOW) — nothing to do
+        return;
+    }
+
+    Serial.println("Factory reset button held — counting down...");
+    unsigned long pressStart = millis();
+
+    while (digitalRead(FACTORY_RESET_PIN) == LOW)
+    {
+        unsigned long held = millis() - pressStart;
+
+        // Update OLED with countdown
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 0);
+        display.println("!! FACTORY RESET !!");
+        display.println();
+        display.print("Hold button: ");
+        display.print((held / 1000));
+        display.println("s");
+        display.println();
+        display.print("Release to cancel");
+        display.display();
+
+        if (held >= FACTORY_RESET_HOLD_MS)
+        {
+            factoryReset(); // Does not return — restarts ESP32
+        }
+
+        delay(100);
+    }
+
+    // Button released before threshold — cancelled
+    Serial.println("Factory reset cancelled (button released early).");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Reset cancelled.");
+    display.display();
+    delay(1000);
 }
 
 void loadConfiguration()
@@ -566,6 +648,9 @@ void setup()
     // RFID status pin
     pinMode(RFID_STATUS_PIN, INPUT_PULLUP);
 
+    // Factory reset button (active LOW — internal pull-up keeps it HIGH when not pressed)
+    pinMode(FACTORY_RESET_PIN, INPUT_PULLUP);
+
     // Relay pins
     pinMode(EV_RELAY_PIN, OUTPUT);
     digitalWrite(EV_RELAY_PIN, !EV_ACTIVE_LEVEL);
@@ -583,6 +668,11 @@ void setup()
 
     // Initialize OLED Display
     initializeDisplay();
+
+    // ── Check for factory reset BEFORE loading config ──────────────────────
+    // If user holds the button at power-on, wipe config immediately
+    checkFactoryReset();
+    // ───────────────────────────────────────────────────────────────────────
 
     loadConfiguration();
 
@@ -618,6 +708,11 @@ void loop()
         delay(50);
         return;
     }
+
+    // ── Factory reset check in normal operation ─────────────────────────────
+    // User can also trigger reset while the device is running normally
+    checkFactoryReset();
+    // ───────────────────────────────────────────────────────────────────────
 
     unsigned long now = millis();
 
