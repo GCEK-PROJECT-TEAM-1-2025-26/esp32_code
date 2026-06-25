@@ -228,6 +228,12 @@ void saveKeypadPIN(const String& newPin)
 //   B    → Toggle 3-Pin Socket    (only when box is unlocked)
 //   C    → Lock the box
 //   D    → Show live status on OLED
+// Forward declarations for hardware control
+void unlockBox();
+void lockBox();
+void setEvRelay(bool state);
+void setP3Relay(bool state);
+
 void handleKeypadInput()
 {
     if (!keypadReady) return;
